@@ -1,0 +1,8 @@
+build/
+data/
+*.fvecs
+*.bvecs
+*.ivecs
+*.fbin
+*.ibin
+*.tar.gz
