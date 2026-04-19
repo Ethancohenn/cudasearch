@@ -45,6 +45,20 @@ static int count_vectors(FILE* f, int elem_bytes) {
     return (int)(file_size / record_size);
 }
 
+// L2-normalize a matrix in-place so each row has unit length. After this,
+// inner product between rows is cosine similarity.
+static void l2_normalize(std::vector<float>& M, int n, int d) {
+    for (int i = 0; i < n; ++i) {
+        float* row = M.data() + (size_t)i * d;
+        float norm = 0.f;
+        for (int j = 0; j < d; ++j) norm += row[j] * row[j];
+        norm = std::sqrt(norm);
+        if (norm > 1e-9f) {
+            for (int j = 0; j < d; ++j) row[j] /= norm;
+        }
+    }
+}
+
 // ─── Public loaders ───────────────────────────────────────────────────────────
 
 std::vector<float> load_fvecs(const std::string& path,
@@ -156,7 +170,11 @@ Dataset load_dataset(const std::string& dir, const std::string& name) {
     ds.queries = load_fvecs(query_path, ds.n_queries, ds.dim);
     ds.gt      = load_ivecs(gt_path,    ds.n_queries, ds.gt_k);
 
-    printf("[io] Loaded %s: %d base vectors, %d queries, dim=%d, gt_k=%d\n",
+    l2_normalize(ds.base,    ds.n_base,    ds.dim);
+    l2_normalize(ds.queries, ds.n_queries, ds.dim);
+
+    printf("[io] Loaded %s: %d base vectors, %d queries, dim=%d, gt_k=%d "
+           "(L2-normalized)\n",
            name.c_str(), ds.n_base, ds.n_queries, ds.dim, ds.gt_k);
     return ds;
 }
@@ -193,14 +211,7 @@ Dataset make_random_dataset(int n_base, int n_queries, int dim, int gt_k,
     auto make_matrix = [&](int rows) {
         std::vector<float> M((size_t)rows * dim);
         for (auto& v : M) v = nd(rng);
-        // L2-normalise each row so that IP = cosine similarity
-        for (int i = 0; i < rows; ++i) {
-            float* row = M.data() + (size_t)i * dim;
-            float norm = 0.f;
-            for (int j = 0; j < dim; ++j) norm += row[j] * row[j];
-            norm = std::sqrt(norm);
-            for (int j = 0; j < dim; ++j) row[j] /= norm;
-        }
+        l2_normalize(M, rows, dim);
         return M;
     };
 
