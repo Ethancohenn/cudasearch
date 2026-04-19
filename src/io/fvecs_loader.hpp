@@ -74,6 +74,8 @@ struct Dataset {
 //   <dir>/<name>_base.fvecs
 //   <dir>/<name>_query.fvecs
 //   <dir>/<name>_groundtruth.ivecs
+// Base and query vectors are L2-normalized after loading, so inner product
+// search is equivalent to cosine similarity on the loaded dataset.
 Dataset load_dataset(const std::string& dir, const std::string& name);
 
 // Generate a synthetic random dataset (unit-normalised, so IP = cosine).
