@@ -55,11 +55,24 @@ if(USE_OPENMP)
   target_link_libraries(cudasearch_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+# ── Library: cuda ──────────────────────────────────────────────────────────────
+if(USE_CUDA)
+  add_library(cudasearch_cuda STATIC
+    src/cuda/gpu_search.cu
+  )
+  target_include_directories(cudasearch_cuda PUBLIC src)
+  target_link_libraries(cudasearch_cuda PUBLIC cudasearch_core)
+  target_compile_definitions(cudasearch_cuda PUBLIC HAVE_CUDA)
+endif()
+
 # ── Executable: bench ──────────────────────────────────────────────────────────
 add_executable(bench bench/main_bench.cpp)
 target_link_libraries(bench PRIVATE cudasearch_core cudasearch_io)
 if(USE_OPENMP)
   target_link_libraries(bench PRIVATE OpenMP::OpenMP_CXX)
+endif()
+if(USE_CUDA)
+  target_link_libraries(bench PRIVATE cudasearch_cuda)
 endif()
 
 # ── Executable: test_recall ────────────────────────────────────────────────────
@@ -67,6 +80,9 @@ add_executable(test_recall tests/test_recall.cpp)
 target_link_libraries(test_recall PRIVATE cudasearch_core cudasearch_io)
 if(USE_OPENMP)
   target_link_libraries(test_recall PRIVATE OpenMP::OpenMP_CXX)
+endif()
+if(USE_CUDA)
+  target_link_libraries(test_recall PRIVATE cudasearch_cuda)
 endif()
 
 # ── Summary ────────────────────────────────────────────────────────────────────
