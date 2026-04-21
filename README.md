@@ -15,6 +15,28 @@ The system is built in three layers, introduced progressively across milestones:
 | CUDA kernels (naive + tiled + INT8) |
 | MPI sharding across multiple GPUs |
 
+## Results
+
+SIFT1M, N=1M, d=128, B=100, k=10. Recall@10=0.9890 across all configurations. Measured on Quadro RTX 6000 (Turing, 672 GB/s).
+
+**CPU (OpenMP):**
+
+| Threads | mean latency | QPS |
+|---|---|---|
+| 1  | 4964 ms | 20.1 |
+| 2  | 4296 ms | 23.3 |
+| 4  | 4312 ms | 23.2 |
+| 8  | 4401 ms | 22.7 |
+| 16 | 4627 ms | 21.6 |
+
+CPU saturates memory bandwidth at 2 threads (0.5 FLOP/byte arithmetic intensity).
+
+**GPU:**
+
+| Kernel | mean latency | QPS | speedup vs CPU best |
+|---|---|---|---|
+| naive (v1) | 1044 ms | 96 | 4.1× |
+
 ## Datasets
 
 | Dataset | Vectors | Dim | Size |
@@ -63,6 +85,11 @@ cmake --build build -j$(nproc)
 **Benchmark (SIFT1M):**
 ```bash
 ./build/bench --data ./data --dataset sift1m --k 10 --batch 100 --trials 5
+```
+
+**Benchmark (SIFT1M, GPU naive kernel):**
+```bash
+./build/bench --data ./data/sift1m --dataset sift1m --kernel naive --k 10 --batch 100 --trials 5
 ```
 
 **CSV output (for scripting):**
