@@ -17,7 +17,8 @@ The system is built in three layers, introduced progressively across milestones:
 
 ## Results
 
-SIFT1M, N=1M, d=128, B=100, k=10. Recall@10=0.9890 across all configurations. Measured on Quadro RTX 6000 (Turing, 672 GB/s).
+We compare the CPU baseline against the a naive implementation of GPU kernel where each thread runs one dot product computation on the SIFT1M dataset (1M × 128 float32 vectors), running a batch of B=100 queries with top-k=10. 
+
 
 **CPU (OpenMP):**
 
@@ -29,13 +30,20 @@ SIFT1M, N=1M, d=128, B=100, k=10. Recall@10=0.9890 across all configurations. Me
 | 8  | 4401 ms | 22.7 |
 | 16 | 4627 ms | 21.6 |
 
-CPU saturates memory bandwidth at 2 threads (0.5 FLOP/byte arithmetic intensity).
+
+Every configuration returns **Recall@10 = 0.9890** against the dataset's reference ground truth. 
+
+Throughput peaks at 2 threads and degrades past that. This is a symptom of a memory-bound computation as the computation has arithmetic intensity ~0.5 FLOP/byte (one multiply-add per 4-byte float read ), which, according to the roofline graph, sits far below the CPU's compute/bandwidth crossover point. In other words, two threads are already enough to consume the available memory bandwidth; 
+
+Adding more threads does not add usable bandwidth, only contention. The CPU cannot be made faster on this workload without more memory bandwidth — motivating the need for a GPU implementation.
 
 **GPU:**
 
 | Kernel | mean latency | QPS | speedup vs CPU best |
 |---|---|---|---|
 | naive (v1) | 1044 ms | 96 | 4.1× |
+
+The GPU completes the same batch in roughly a quarter of the CPU time (**3.94× speedup** on the same-node Quadro RTX 6000).
 
 ## Datasets
 
@@ -105,6 +113,7 @@ cudasearch/
     io/           # Dataset loaders (.fvecs / .ivecs / .bvecs)
     core/         # CPU baseline + recall evaluation
     mpi/          # MPI sharding and distributed top-k merge
+    cuda/         # CUDA naive implementation
   bench/          # Benchmark driver
   tests/          # Recall correctness tests
   scripts/        # Dataset download scripts
