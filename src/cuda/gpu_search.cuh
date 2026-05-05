@@ -21,10 +21,14 @@ namespace core {
 SearchResult gpu_search_naive(const float* X, int N, int d,
                               const float* Q, int B, int k);
 
-// 32×32 tiled kernel: each block computes a TILE×TILE submatrix of S = Q·Xᵀ.
-// Q tile loaded coalesced; X tile non-coalesced (unavoidable, row-major X) but
-// stored transposed in shared memory to eliminate bank conflicts in the compute
-// loop. CPU nth_element for top-k.
+// Tiled GPU search.
+//
+// This computes the same B-by-N score matrix as the naive version, but each
+// CUDA block works on a 32-by-32 square of scores at a time. The block loads a
+// small piece of Q and a small piece of X into shared memory, reuses those
+// values to compute dot products, then moves to the next 32 dimensions.
+//
+// Top-k is still computed on the CPU with nth_element, matching the naive path.
 SearchResult gpu_search_tiled(const float* X, int N, int d,
                               const float* Q, int B, int k);
 

@@ -17,7 +17,7 @@ The system is built in three layers, introduced progressively across milestones:
 
 ## Results
 
-We compare the CPU baseline against the a naive implementation of GPU kernel where each thread runs one dot product computation on the SIFT1M dataset (1M × 128 float32 vectors), running a batch of B=100 queries with top-k=10. 
+We compare the CPU baseline against a naive implementation of GPU kernel where each thread runs one dot product computation on the SIFT1M dataset (1M × 128 float32 vectors), running a batch of B=100 queries with top-k=10. 
 
 
 **CPU (OpenMP):**

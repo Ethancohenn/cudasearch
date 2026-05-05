@@ -100,69 +100,76 @@ SearchResult gpu_search_naive(const float* X, int N, int d,
     return result;
 }
 
-// ─── Tiled kernel ────────────────────────────────────────────────────────────
+// Tiled kernel
 //
-// Computes S = Q · Xᵀ  (B×N score matrix) using 32×32 thread blocks.
-// Each block covers a TILE×TILE submatrix of S: rows b_base..b_base+TILE-1
-// (queries) and columns n_base..n_base+TILE-1 (database vectors).
+// The naive kernel uses one thread for one complete dot product. This tiled
+// kernel keeps that same idea: one thread still owns one score S[b][n], where
+// b is a query and n is a database vector.
 //
-// Thread (ty, tx) owns output S[b_base+ty][n_base+tx].
+// The difference is that a 32-by-32 block of threads works together. During
+// each pass through the embedding dimension d, the block loads:
+//   - 32 query values into q_sm
+//   - 32 database-vector values into x_sm
 //
-// Shared memory layout (one tile step along d):
-//   q_sm[ty][tx] = Q[b_base+ty][d_off+tx]   — row-major, warp reads
-//                                               32 consecutive Q elements → coalesced
-//   x_sm[ty][tx] = X[n_base+tx][d_off+ty]   — stored TRANSPOSED (dim × n).
-//                                               Warp reads stride-d elements from X
-//                                               (unavoidable with row-major X), but
-//                                               the transposed layout means the compute
-//                                               loop reads x_sm[k][tx=0..31], which are
-//                                               32 consecutive elements → no bank conflicts.
+// After the values are in shared memory, every thread adds 32 multiply-adds to
+// its own dot product. Then the block advances to the next 32 dimensions.
+//
+// x_sm is stored transposed: x_sm[dimension_inside_tile][database_row_inside_tile].
+// That makes the compute loop easy to read: q_sm[ty][j] and x_sm[j][tx] are the
+// two numbers for the same dimension j.
 
 static constexpr int TILE = 32;
 
-__global__ static void gpu_search_tiled_kernel(
-    const float* __restrict__ X,   // [N × d] database, row-major
-    const float* __restrict__ Q,   // [B × d] queries,   row-major
-    float*       __restrict__ S,   // [B × N] scores,    row-major
-    int N, int d, int B)
+__global__ void gpu_search_tiled_kernel(const float* X, int N, int d,
+                                        const float* Q, int B, float* S)
 {
-    __shared__ float q_sm[TILE][TILE];  // q_sm[query_in_tile][d_in_tile]
-    __shared__ float x_sm[TILE][TILE];  // x_sm[d_in_tile][n_in_tile]  ← transposed
+    // q_sm holds query values for this block.
+    // x_sm holds database values for this block, stored transposed.
+    __shared__ float q_sm[TILE][TILE];
+    __shared__ float x_sm[TILE][TILE];
 
-    const int n_base = blockIdx.x * TILE;
-    const int b_base = blockIdx.y * TILE;
-    const int tx = threadIdx.x;   // n dimension (0..TILE)
-    const int ty = threadIdx.y;   // b dimension (0..TILE)
+    int n_base = blockIdx.x * TILE;  // first database row handled by this block
+    int b_base = blockIdx.y * TILE;  // first query handled by this block
+    int tx = threadIdx.x;            // column inside the tile, maps to database row
+    int ty = threadIdx.y;            // row inside the tile, maps to query
 
-    const int n = n_base + tx;
-    const int b = b_base + ty;
+    int n = n_base + tx;
+    int b = b_base + ty;
 
     float acc = 0.0f;
 
     for (int d_off = 0; d_off < d; d_off += TILE) {
-        // Load Q tile — coalesced: warp reads Q[b][d_off..d_off+31]
-        q_sm[ty][tx] = (b < B && d_off + tx < d)
-                       ? Q[(size_t)b * d + d_off + tx] : 0.0f;
+        // Load one 32-wide slice of the query vector for this thread's query.
+        if ((b < B) && (d_off + tx < d)) {
+            q_sm[ty][tx] = Q[(size_t)b * d + (d_off + tx)];
+        } else {
+            q_sm[ty][tx] = 0.0f;
+        }
 
-        // Load X tile — non-coalesced (warp strides by d across db rows), but
-        // stored transposed so the compute loop below has no bank conflicts.
-        x_sm[ty][tx] = (n < N && d_off + ty < d)
-                       ? X[(size_t)(n_base + tx) * d + d_off + ty] : 0.0f;
+        // Load one 32-wide slice of the database vector for this thread's row.
+        // The indices are flipped in shared memory: ty selects the
+        // dimension, tx selects the database row.
+        if ((n < N) && (d_off + ty < d)) {
+            x_sm[ty][tx] = X[(size_t)n * d + (d_off + ty)];
+        } else {
+            x_sm[ty][tx] = 0.0f;
+        }
 
         __syncthreads();
 
-        // Accumulate partial dot product for this d tile.
-        // q_sm[ty][k]: all warp threads broadcast the same element — fine.
-        // x_sm[k][tx]: warp reads x_sm[k][0..31], 32 consecutive floats — no bank conflicts.
+        // Add this 32-dimensional slice to the dot product owned by this thread.
         #pragma unroll
-        for (int k = 0; k < TILE; ++k)
-            acc += q_sm[ty][k] * x_sm[k][tx];
+        for (int j = 0; j < TILE; ++j) {
+            acc += q_sm[ty][j] * x_sm[j][tx];
+        }
 
+        // Wait before reusing the shared-memory arrays for the next d slice.
         __syncthreads();
     }
 
-    if (b < B && n < N)
+    if (b < B && n < N) {
         S[(size_t)b * N + n] = acc;
+    }
 }
 
 SearchResult gpu_search_tiled(const float* X, int N, int d,
@@ -178,10 +185,10 @@ SearchResult gpu_search_tiled(const float* X, int N, int d,
     CUDA_CHECK(cudaMemcpy(d_X, X, (size_t)N * d * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_Q, Q, (size_t)B * d * sizeof(float), cudaMemcpyHostToDevice));
 
-    // One 32×32 block per TILE×TILE output submatrix.
+    // One 32-by-32 block computes one 32-by-32 tile of the score matrix.
     dim3 block(TILE, TILE);
     dim3 grid((N + TILE - 1) / TILE, (B + TILE - 1) / TILE);
-    gpu_search_tiled_kernel<<<grid, block>>>(d_X, d_Q, d_S, N, d, B);
+    gpu_search_tiled_kernel<<<grid, block>>>(d_X, N, d, d_Q, B, d_S);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> scores_host((size_t)B * N);
@@ -219,4 +226,4 @@ SearchResult gpu_search_tiled(const float* X, int N, int d,
     return result;
 }
 
-} // namespace core
+}
