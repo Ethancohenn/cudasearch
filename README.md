@@ -17,33 +17,49 @@ The system is built in three layers, introduced progressively across milestones:
 
 ## Results
 
-We compare the CPU baseline against a naive implementation of GPU kernel where each thread runs one dot product computation on the SIFT1M dataset (1M × 128 float32 vectors), running a batch of B=100 queries with top-k=10. 
+Final benchmarks were run on the same `gpu-turing` node (`hpcc-gpu-5-1`) with one Quadro RTX 6000 GPU and 16 allocated CPU cores:
+
+```bash
+srun --partition=gpu-turing --nodelist=hpcc-gpu-5-1 \
+  --gres=gpu:1 --cpus-per-task=16 --mem=32G --pty bash
+```
+
+All runs use `N=1,000,000` base vectors, batch size `B=100`, and `k=10`.
 
 
-**CPU (OpenMP):**
+**SIFT1M CPU scaling (OpenMP):**
 
 | Threads | mean latency | QPS |
 |---|---|---|
-| 1  | 4964 ms | 20.1 |
-| 2  | 4296 ms | 23.3 |
-| 4  | 4312 ms | 23.2 |
-| 8  | 4401 ms | 22.7 |
-| 16 | 4627 ms | 21.6 |
+| 1  | 5472 ms | 18.3 |
+| 2  | 2941 ms | 34.0 |
+| 4  | 1634 ms | 61.2 |
+| 8  | 1427 ms | 70.1 |
+| 16 | 1108 ms | 90.3 |
 
+Every CPU configuration returns **Recall@10 = 0.9890** against the SIFT1M reference ground truth. The best CPU baseline is the 16-thread run. OpenMP gives a 4.94× speedup from 1 to 16 threads, but scaling is sublinear, consistent with an exhaustive scan that becomes increasingly limited by shared memory bandwidth and threading overhead.
 
-Every configuration returns **Recall@10 = 0.9890** against the dataset's reference ground truth. 
+**SIFT1M GPU comparison:**
 
-Throughput peaks at 2 threads and degrades past that. This is a symptom of a memory-bound computation as the computation has arithmetic intensity ~0.5 FLOP/byte (one multiply-add per 4-byte float read ), which, according to the roofline graph, sits far below the CPU's compute/bandwidth crossover point. In other words, two threads are already enough to consume the available memory bandwidth; 
+| Kernel | mean latency | QPS | Recall@10 | speedup vs CPU-16 |
+|---|---:|---:|---:|---:|
+| CPU-16 | 1108 ms | 90.3 | 0.9890 | 1.00× |
+| CUDA naive | 1047 ms | 95.5 | 0.9900 | 1.06× |
+| CUDA tiled | 772 ms | 129.5 | 0.9900 | 1.43× |
 
-Adding more threads does not add usable bandwidth, only contention. The CPU cannot be made faster on this workload without more memory bandwidth — motivating the need for a GPU implementation.
+The naive CUDA kernel assigns one thread to one full dot product. The tiled kernel uses 32×32 thread blocks and shared memory tiles, so each block computes a 32×32 tile of the score matrix. On SIFT1M, tiling gives a **1.36× speedup over naive CUDA**.
 
-**GPU:**
+**GIST1M comparison:**
 
-| Kernel | mean latency | QPS | speedup vs CPU best |
-|---|---|---|---|
-| naive (v1) | 1044 ms | 96 | 4.1× |
+| Kernel | mean latency | QPS | Recall@10 | speedup vs CPU |
+|---|---:|---:|---:|---:|
+| CPU-16 | 7507 ms | 13.3 | 0.3560 | 1.00× |
+| CUDA naive | 8926 ms | 11.2 | 0.3560 | 0.84× |
+| CUDA tiled | 1542 ms | 64.9 | 0.3560 | 4.87× |
 
-The GPU completes the same batch in roughly a quarter of the CPU time (**3.94× speedup** on the same-node Quadro RTX 6000).
+GIST1M has dimension `d=960`, compared with `d=128` for SIFT1M. The longer dot products make shared-memory tiling much more valuable: the tiled kernel is **5.79× faster than naive CUDA** on GIST1M. The low GIST1M recall is not a CPU/GPU correctness issue because all implementations agree; it likely reflects a mismatch between our L2-normalized inner-product objective and the dataset's reference ground truth.
+
+Earlier CPU-only measurements were collected from a GPU allocation that did not explicitly reserve CPU cores. Those results are kept in `results/cpu_scaling.csv` for reference, but the final speedups above use the explicit 16-core same-node allocation.
 
 ## Datasets
 
@@ -67,9 +83,9 @@ cmake -B build -DUSE_OPENMP=ON
 cmake --build build -j$(nproc)
 ```
 
-With CUDA (M3+):
+With CUDA on the Quadro RTX 6000:
 ```bash
-cmake -B build -DUSE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80
+cmake -B build -DUSE_CUDA=ON -DUSE_OPENMP=ON -DCMAKE_CUDA_ARCHITECTURES=75
 cmake --build build -j$(nproc)
 ```
 
@@ -95,9 +111,10 @@ cmake --build build -j$(nproc)
 ./build/bench --data ./data --dataset sift1m --k 10 --batch 100 --trials 5
 ```
 
-**Benchmark (SIFT1M, GPU naive kernel):**
+**Benchmark (SIFT1M, GPU kernels):**
 ```bash
 ./build/bench --data ./data/sift1m --dataset sift1m --kernel naive --k 10 --batch 100 --trials 5
+./build/bench --data ./data/sift1m --dataset sift1m --kernel tiled --k 10 --batch 100 --trials 5
 ```
 
 **CSV output (for scripting):**
@@ -113,9 +130,8 @@ cudasearch/
     io/           # Dataset loaders (.fvecs / .ivecs / .bvecs)
     core/         # CPU baseline + recall evaluation
     mpi/          # MPI sharding and distributed top-k merge
-    cuda/         # CUDA naive implementation
+    cuda/         # CUDA naive and tiled implementations
   bench/          # Benchmark driver
   tests/          # Recall correctness tests
   scripts/        # Dataset download scripts
 ```
-
