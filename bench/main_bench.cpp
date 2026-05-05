@@ -23,6 +23,9 @@
 
 #include "core/cpu_search.hpp"
 #include "io/fvecs_loader.hpp"
+#ifdef HAVE_CUDA
+#include "cuda/gpu_search.cuh"
+#endif
 
 #include <algorithm>
 #include <cassert>
@@ -97,9 +100,14 @@ static Stats run_trials(const Config& cfg,
     for (int t = 0; t < cfg.trials; ++t) {
         if (cfg.kernel == "cpu") {
             last_result = core::cpu_search(X, N, d, Q, B, k);
-        } else {
-            fprintf(stderr, "Unknown kernel: %s (only 'cpu' implemented for now)\n",
-                    cfg.kernel.c_str());
+        }
+#ifdef HAVE_CUDA
+        else if (cfg.kernel == "naive") {
+            last_result = core::gpu_search_naive(X, N, d, Q, B, k);
+        }
+#endif
+        else {
+            fprintf(stderr, "Unknown kernel: %s\n", cfg.kernel.c_str());
             std::exit(1);
         }
         times.push_back(last_result.wall_ms);
