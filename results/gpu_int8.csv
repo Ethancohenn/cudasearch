@@ -1,0 +1,2 @@
+dataset,kernel,N,d,k,B,mean_ms,min_ms,qps,recall
+sift1m,int8,1000000,128,10,100,1893.23,1871.67,52.8,0.9630

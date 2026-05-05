@@ -32,4 +32,15 @@ SearchResult gpu_search_naive(const float* X, int N, int d,
 SearchResult gpu_search_tiled(const float* X, int N, int d,
                               const float* Q, int B, int k);
 
+// INT8 GPU search.
+//
+// This keeps the same one-thread-per-dot-product structure as the naive CUDA
+// kernel, but the database X is quantized on the CPU before being copied to the
+// GPU. Each row of X gets one scale factor, and the kernel reads int8 values
+// instead of float values for X.
+//
+// Q stays float, scores stay float, and top-k is still computed on the CPU.
+SearchResult gpu_search_int8(const float* X, int N, int d,
+                             const float* Q, int B, int k);
+
 }

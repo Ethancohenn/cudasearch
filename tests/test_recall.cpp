@@ -1,4 +1,4 @@
-//  test_recall — validate cpu_search correctness
+//  test_recall — validate search correctness
 //
 //  Usage:
 //    ./test_recall                          # synthetic only (fast)
@@ -10,10 +10,15 @@
 
 #include "core/cpu_search.hpp"
 #include "io/fvecs_loader.hpp"
+#ifdef HAVE_CUDA
+#include "cuda/gpu_search.cuh"
+#endif
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -25,7 +30,8 @@ static bool check(bool cond, const char* msg) {
 }
 
 // ─── Test 1: self-consistency on synthetic data ───────────────────────────────
-// cpu_search against its own ground truth must give Recall@k = 1.0
+// Exact kernels should match the synthetic ground truth. INT8 is approximate, so
+// we use a slightly lower threshold for it.
 
 static bool test_synthetic_recall() {
     printf("\n=== Test: synthetic recall (N=5000, d=128, B=100, k=10) ===\n");
@@ -33,13 +39,36 @@ static bool test_synthetic_recall() {
     int N = 5000, d = 128, B = 100, k = 10;
     auto ds = io::make_random_dataset(N, B, d, k, /*seed=*/42);
 
-    auto result = core::cpu_search(ds.base, N, d, ds.queries, B, k);
+    bool ok = true;
 
-    float r = core::recall_at_k(result, ds.gt, k, B, k);
-    printf("  Recall@%d = %.4f  (expected 1.0000)\n", k, r);
+    auto check_result = [&](const char* label,
+                            const core::SearchResult& result,
+                            float threshold) {
+        float r = core::recall_at_k(result, ds.gt, k, B, k);
+        printf("  %-16s Recall@%d = %.4f  (threshold %.4f)\n",
+               label, k, r, threshold);
+        core::print_result_summary(label, result, ds.gt, k, B, k);
+        ok = check(r >= threshold, "Synthetic Recall@10 below threshold") && ok;
+    };
 
-    core::print_result_summary("cpu_search synthetic", result, ds.gt, k, B, k);
-    return check(r >= 0.9999f, "Recall@10 on synthetic data < 1.0");
+    auto cpu_result = core::cpu_search(ds.base, N, d, ds.queries, B, k);
+    check_result("cpu", cpu_result, 0.9999f);
+
+#ifdef HAVE_CUDA
+    auto naive_result = core::gpu_search_naive(
+        ds.base.data(), N, d, ds.queries.data(), B, k);
+    check_result("cuda naive", naive_result, 0.9999f);
+
+    auto tiled_result = core::gpu_search_tiled(
+        ds.base.data(), N, d, ds.queries.data(), B, k);
+    check_result("cuda tiled", tiled_result, 0.9999f);
+
+    auto int8_result = core::gpu_search_int8(
+        ds.base.data(), N, d, ds.queries.data(), B, k);
+    check_result("cuda int8", int8_result, 0.9000f);
+#endif
+
+    return ok;
 }
 
 // ─── Test 2: trivial 3-vector sanity check ───────────────────────────────────

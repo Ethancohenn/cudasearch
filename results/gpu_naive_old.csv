@@ -1,0 +1,4 @@
+[io] Loaded sift1m: 1000000 base vectors, 10000 queries, dim=128, gt_k=100 (L2-normalized)
+sift1m,naive,1000000,128,10,100,1043.76,1022.03,95.8,0.9890
+[io] Loaded sift1m: 1000000 base vectors, 10000 queries, dim=128, gt_k=100 (L2-normalized)
+sift1m,cpu,1000000,128,10,100,4114.02,4108.34,24.3,0.9890

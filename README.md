@@ -46,6 +46,7 @@ Every CPU configuration returns **Recall@10 = 0.9890** against the SIFT1M refere
 | CPU-16 | 1108 ms | 90.3 | 0.9890 | 1.00× |
 | CUDA naive | 1047 ms | 95.5 | 0.9900 | 1.06× |
 | CUDA tiled | 772 ms | 129.5 | 0.9900 | 1.43× |
+| CUDA INT8 | 1893 ms | 52.8 | 0.9630 | 0.59× |
 
 The naive CUDA kernel assigns one thread to one full dot product. The tiled kernel uses 32×32 thread blocks and shared memory tiles, so each block computes a 32×32 tile of the score matrix. On SIFT1M, tiling gives a **1.36× speedup over naive CUDA**.
 
@@ -56,8 +57,20 @@ The naive CUDA kernel assigns one thread to one full dot product. The tiled kern
 | CPU-16 | 7507 ms | 13.3 | 0.3560 | 1.00× |
 | CUDA naive | 8926 ms | 11.2 | 0.3560 | 0.84× |
 | CUDA tiled | 1542 ms | 64.9 | 0.3560 | 4.87× |
+| CUDA INT8 | 6497 ms | 15.4 | 0.3540 | 1.16× |
 
-GIST1M has dimension `d=960`, compared with `d=128` for SIFT1M. The longer dot products make shared-memory tiling much more valuable: the tiled kernel is **5.79× faster than naive CUDA** on GIST1M. The low GIST1M recall is not a CPU/GPU correctness issue because all implementations agree; it likely reflects a mismatch between our L2-normalized inner-product objective and the dataset's reference ground truth.
+GIST1M has dimension `d=960`, compared with `d=128` for SIFT1M. The longer dot products make shared-memory tiling much more valuable: the tiled kernel is **5.79× faster than naive CUDA** on GIST1M. The INT8 kernel is also more useful on GIST1M than on SIFT1M, improving over naive CUDA by **1.37×** with almost no additional recall loss. It is still much slower than tiled because this first INT8 path quantizes `X` inside each search call, converts INT8 values back to float in the kernel, and still computes top-k on the CPU. The low GIST1M recall is not a CPU/GPU correctness issue because all implementations agree; it likely reflects a mismatch between our L2-normalized inner-product objective and the dataset's reference ground truth.
+
+**Synthetic kernel check:**
+
+| Kernel | mean latency | QPS | Recall@10 |
+|---|---:|---:|---:|
+| CPU | 40.13 ms | 2491.7 | 1.0000 |
+| CUDA naive | 102.85 ms | 972.3 | 1.0000 |
+| CUDA tiled | 83.22 ms | 1201.6 | 1.0000 |
+| CUDA INT8 | 120.21 ms | 831.9 | 0.9890 |
+
+The synthetic check confirms that CPU, naive CUDA, and tiled CUDA match the generated ground truth exactly, while INT8 has a small expected recall drop from quantization.
 
 Earlier CPU-only measurements were collected from a GPU allocation that did not explicitly reserve CPU cores. Those results are kept in `results/cpu_scaling.csv` for reference, but the final speedups above use the explicit 16-core same-node allocation.
 
@@ -115,6 +128,7 @@ cmake --build build -j$(nproc)
 ```bash
 ./build/bench --data ./data/sift1m --dataset sift1m --kernel naive --k 10 --batch 100 --trials 5
 ./build/bench --data ./data/sift1m --dataset sift1m --kernel tiled --k 10 --batch 100 --trials 5
+./build/bench --data ./data/sift1m --dataset sift1m --kernel int8 --k 10 --batch 100 --trials 5
 ```
 
 **CSV output (for scripting):**
@@ -130,7 +144,7 @@ cudasearch/
     io/           # Dataset loaders (.fvecs / .ivecs / .bvecs)
     core/         # CPU baseline + recall evaluation
     mpi/          # MPI sharding and distributed top-k merge
-    cuda/         # CUDA naive and tiled implementations
+    cuda/         # CUDA naive, tiled, and INT8 implementations
   bench/          # Benchmark driver
   tests/          # Recall correctness tests
   scripts/        # Dataset download scripts
