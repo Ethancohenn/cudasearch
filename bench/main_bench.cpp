@@ -104,6 +104,8 @@ static Stats run_trials(const Config& cfg,
 #ifdef HAVE_CUDA
         else if (cfg.kernel == "naive") {
             last_result = core::gpu_search_naive(X, N, d, Q, B, k);
+        } else if (cfg.kernel == "tiled") {
+            last_result = core::gpu_search_tiled(X, N, d, Q, B, k);
         }
 #endif
         else {
