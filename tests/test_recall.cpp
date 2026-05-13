@@ -66,6 +66,10 @@ static bool test_synthetic_recall() {
     auto int8_result = core::gpu_search_int8(
         ds.base.data(), N, d, ds.queries.data(), B, k);
     check_result("cuda int8", int8_result, 0.9000f);
+
+    auto int8_tiled_result = core::gpu_search_int8_tiled(
+        ds.base.data(), N, d, ds.queries.data(), B, k);
+    check_result("cuda int8 tiled", int8_tiled_result, 0.9000f);
 #endif
 
     return ok;

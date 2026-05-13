@@ -12,8 +12,8 @@ The system is built in three layers, introduced progressively across milestones:
 | Layer |
 |---|
 | CPU baseline (OpenMP) |
-| CUDA kernels (naive + tiled + INT8) |
-| MPI sharding across multiple GPUs |
+| CUDA kernels (naive + tiled + row-major INT8 + tiled INT8) |
+| MPI sharding across multiple GPUs (next milestone) |
 
 ## Results
 
@@ -47,8 +47,19 @@ Every CPU configuration returns **Recall@10 = 0.9890** against the SIFT1M refere
 | CUDA naive | 1047 ms | 95.5 | 0.9900 | 1.06× |
 | CUDA tiled | 772 ms | 129.5 | 0.9900 | 1.43× |
 | CUDA INT8 | 1893 ms | 52.8 | 0.9630 | 0.59× |
+| CUDA INT8 tiled | 699 ms | 143.0 | 0.9630 | 1.58× |
 
-The naive CUDA kernel assigns one thread to one full dot product. The tiled kernel uses 32×32 thread blocks and shared memory tiles, so each block computes a 32×32 tile of the score matrix. On SIFT1M, tiling gives a **1.36× speedup over naive CUDA**.
+The naive CUDA kernel assigns one thread to one full dot product. The tiled
+kernel uses 32×32 thread blocks and shared memory tiles, so each block computes
+a 32×32 tile of the score matrix. On SIFT1M, tiling gives a **1.36× speedup
+over naive CUDA**. The first INT8 path is slower because it quantizes the full
+database inside every search call and still uses a naive row-major access
+pattern. The new `int8_tiled` path fixes those implementation costs by
+quantizing the database once, storing it in a transposed INT8 layout for
+coalesced reads, using the shared-memory tiled kernel structure, and reusing GPU
+scratch buffers across benchmark trials. It preserves the same INT8 Recall@10
+as the original INT8 path while improving latency by **2.71× over old INT8** and
+by **1.10× over FP32 tiled CUDA** on SIFT1M.
 
 **GIST1M comparison:**
 
@@ -58,8 +69,17 @@ The naive CUDA kernel assigns one thread to one full dot product. The tiled kern
 | CUDA naive | 8926 ms | 11.2 | 0.3560 | 0.84× |
 | CUDA tiled | 1542 ms | 64.9 | 0.3560 | 4.87× |
 | CUDA INT8 | 6497 ms | 15.4 | 0.3540 | 1.16× |
+| CUDA INT8 tiled | 1032 ms | 96.9 | 0.3540 | 7.28× |
 
-GIST1M has dimension `d=960`, compared with `d=128` for SIFT1M. The longer dot products make shared-memory tiling much more valuable: the tiled kernel is **5.79× faster than naive CUDA** on GIST1M. The INT8 kernel is also more useful on GIST1M than on SIFT1M, improving over naive CUDA by **1.37×** with almost no additional recall loss. It is still much slower than tiled because this first INT8 path quantizes `X` inside each search call, converts INT8 values back to float in the kernel, and still computes top-k on the CPU. The low GIST1M recall is not a CPU/GPU correctness issue because all implementations agree; it likely reflects a mismatch between our L2-normalized inner-product objective and the dataset's reference ground truth.
+GIST1M has dimension `d=960`, compared with `d=128` for SIFT1M. The longer dot
+products make shared-memory tiling much more valuable: the FP32 tiled kernel is
+**5.79× faster than naive CUDA** on GIST1M. The new `int8_tiled` kernel benefits
+even more from reducing database memory traffic in this high-dimensional case:
+it is **6.30× faster than the original INT8 path** and **1.49× faster than FP32
+tiled CUDA** on GIST1M, with essentially the same recall as the original INT8
+kernel. The low GIST1M recall is not a CPU/GPU correctness issue because all
+implementations agree closely; it likely reflects a mismatch between our
+L2-normalized inner-product objective and the dataset's reference ground truth.
 
 **Synthetic kernel check:**
 
@@ -72,7 +92,10 @@ GIST1M has dimension `d=960`, compared with `d=128` for SIFT1M. The longer dot p
 
 The synthetic check confirms that CPU, naive CUDA, and tiled CUDA match the generated ground truth exactly, while INT8 has a small expected recall drop from quantization.
 
-Earlier CPU-only measurements were collected from a GPU allocation that did not explicitly reserve CPU cores. Those results are kept in `results/cpu_scaling.csv` for reference, but the final speedups above use the explicit 16-core same-node allocation.
+Earlier CPU-only measurements were collected from a GPU allocation that did not
+explicitly reserve CPU cores. Those results are kept in
+`results/cpu_scaling.csv` for reference, but the final speedups above use
+explicit 16-core GPU-node allocations.
 
 ## Datasets
 
@@ -111,7 +134,7 @@ cmake --build build -j$(nproc)
 
 **Correctness test on real data:**
 ```bash
-./build/test_recall --data ./data sift1m
+./build/test_recall --data ./data/sift1m sift1m
 ```
 
 **Benchmark (synthetic):**
@@ -121,7 +144,7 @@ cmake --build build -j$(nproc)
 
 **Benchmark (SIFT1M):**
 ```bash
-./build/bench --data ./data --dataset sift1m --k 10 --batch 100 --trials 5
+./build/bench --data ./data/sift1m --dataset sift1m --k 10 --batch 100 --trials 5
 ```
 
 **Benchmark (SIFT1M, GPU kernels):**
@@ -129,7 +152,12 @@ cmake --build build -j$(nproc)
 ./build/bench --data ./data/sift1m --dataset sift1m --kernel naive --k 10 --batch 100 --trials 5
 ./build/bench --data ./data/sift1m --dataset sift1m --kernel tiled --k 10 --batch 100 --trials 5
 ./build/bench --data ./data/sift1m --dataset sift1m --kernel int8 --k 10 --batch 100 --trials 5
+./build/bench --data ./data/sift1m --dataset sift1m --kernel int8_tiled --k 10 --batch 100 --trials 5
 ```
+
+`int8_tiled` is the speed-focused INT8 path. It builds a cached quantized GPU
+index once before timed trials, stores the database in a transposed INT8 layout
+for coalesced reads, and reuses GPU scratch buffers across trials.
 
 **CSV output (for scripting):**
 ```bash
@@ -143,8 +171,7 @@ cudasearch/
   src/
     io/           # Dataset loaders (.fvecs / .ivecs / .bvecs)
     core/         # CPU baseline + recall evaluation
-    mpi/          # MPI sharding and distributed top-k merge
-    cuda/         # CUDA naive, tiled, and INT8 implementations
+    cuda/         # CUDA naive, tiled, row-major INT8, and tiled INT8 implementations
   bench/          # Benchmark driver
   tests/          # Recall correctness tests
   scripts/        # Dataset download scripts

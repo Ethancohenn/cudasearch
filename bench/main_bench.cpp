@@ -6,7 +6,7 @@
 //  Options:
 //    --data <dir>         Path to dataset directory
 //    --dataset <name>     Dataset name (default: sift1m)
-//    --kernel  <name>     Kernel: cpu, naive, tiled, int8
+//    --kernel  <name>     Kernel: cpu, naive, tiled, int8, int8_tiled
 //    --k <int>            Number of neighbours (default: 10)
 //    --batch <int>        Query batch size (default: 100)
 //    --n <int>            Max database size (-1 = full, default: -1)
@@ -97,6 +97,17 @@ static Stats run_trials(const Config& cfg,
     std::vector<double> times;
     core::SearchResult last_result;
 
+#ifdef HAVE_CUDA
+    if (cfg.kernel == "int8_tiled") {
+        core::GpuInt8TiledIndex index(X, N, d);
+        index.reserve_query_capacity(B);
+
+        for (int t = 0; t < cfg.trials; ++t) {
+            last_result = index.search(Q, B, k);
+            times.push_back(last_result.wall_ms);
+        }
+    } else
+#endif
     for (int t = 0; t < cfg.trials; ++t) {
         if (cfg.kernel == "cpu") {
             last_result = core::cpu_search(X, N, d, Q, B, k);

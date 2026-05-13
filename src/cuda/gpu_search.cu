@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -363,6 +364,208 @@ SearchResult gpu_search_int8(const float* X, int N, int d,
     CUDA_CHECK(cudaFree(d_S));
 
     // STEP 8: populate and return SearchResult.
+    auto t1 = std::chrono::high_resolution_clock::now();
+    result.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    return result;
+}
+
+// Cached tiled INT8 search
+//
+// The original gpu_search_int8 path stores Xq in row-major order, so a warp of
+// threads reading the same dimension from consecutive database rows jumps by d
+// bytes between lanes. This version stores Xq_T[dimension][row]. That makes
+// the database load coalesced for the common access pattern inside the tiled
+// kernel.
+
+static void quantize_X_int8_transposed(const float* X, int N, int d,
+                                       std::vector<int8_t>& Xq_T,
+                                       std::vector<float>& X_scale)
+{
+    Xq_T.resize((size_t)N * d);
+    X_scale.resize(N);
+
+    for (int i = 0; i < N; ++i) {
+        const float* row = X + (size_t)i * d;
+
+        float max_abs = 0.0f;
+        for (int j = 0; j < d; ++j) {
+            max_abs = std::max(max_abs, std::fabs(row[j]));
+        }
+
+        float scale = (max_abs > 0.0f) ? max_abs / 127.0f : 1.0f;
+        X_scale[i] = scale;
+
+        for (int j = 0; j < d; ++j) {
+            int q = (int)std::lround(row[j] / scale);
+            q = std::max(-127, std::min(127, q));
+            Xq_T[(size_t)j * N + i] = (int8_t)q;
+        }
+    }
+}
+
+static SearchResult topk_from_scores(const std::vector<float>& scores_host,
+                                     int B, int N, int k)
+{
+    if (k > N)
+        throw std::invalid_argument("k > N in topk_from_scores");
+
+    SearchResult result;
+    result.indices.resize((size_t)B * k);
+    result.scores.resize((size_t)B * k);
+
+    std::vector<std::pair<float, int>> scored(N);
+    auto cmp = [](const std::pair<float,int>& a,
+                  const std::pair<float,int>& b) { return a.first > b.first; };
+
+    for (int b = 0; b < B; ++b) {
+        const float* row = scores_host.data() + (size_t)b * N;
+        for (int i = 0; i < N; ++i) scored[i] = {row[i], i};
+
+        if (k < N) {
+            std::nth_element(scored.begin(), scored.begin() + k, scored.end(), cmp);
+        }
+        std::sort(scored.begin(), scored.begin() + k, cmp);
+
+        int* out_idx = result.indices.data() + (size_t)b * k;
+        float* out_scr = result.scores.data() + (size_t)b * k;
+        for (int j = 0; j < k; ++j) {
+            out_idx[j] = scored[j].second;
+            out_scr[j] = scored[j].first;
+        }
+    }
+
+    return result;
+}
+
+__global__ void gpu_search_int8_tiled_kernel(const int8_t* Xq_T,
+                                             const float* X_scale,
+                                             int N, int d,
+                                             const float* Q, int B,
+                                             float* S)
+{
+    __shared__ float q_sm[TILE][TILE];
+    __shared__ int8_t x_sm[TILE][TILE];
+
+    int n_base = blockIdx.x * TILE;
+    int b_base = blockIdx.y * TILE;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    int n = n_base + tx;
+    int b = b_base + ty;
+
+    float acc = 0.0f;
+
+    for (int d_off = 0; d_off < d; d_off += TILE) {
+        if ((b < B) && (d_off + tx < d)) {
+            q_sm[ty][tx] = Q[(size_t)b * d + (d_off + tx)];
+        } else {
+            q_sm[ty][tx] = 0.0f;
+        }
+
+        if ((n < N) && (d_off + ty < d)) {
+            x_sm[ty][tx] = Xq_T[(size_t)(d_off + ty) * N + n];
+        } else {
+            x_sm[ty][tx] = 0;
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int j = 0; j < TILE; ++j) {
+            acc += q_sm[ty][j] * (float)x_sm[j][tx];
+        }
+
+        __syncthreads();
+    }
+
+    if (b < B && n < N) {
+        S[(size_t)b * N + n] = acc * X_scale[n];
+    }
+}
+
+GpuInt8TiledIndex::GpuInt8TiledIndex(const float* X, int N, int d)
+    : N_(N), d_(d), d_Xq_T_(nullptr), d_X_scale_(nullptr),
+      d_Q_(nullptr), d_S_(nullptr), scratch_B_(0)
+{
+    if (N <= 0 || d <= 0) {
+        throw std::invalid_argument("GpuInt8TiledIndex requires N > 0 and d > 0");
+    }
+
+    std::vector<int8_t> Xq_T_host;
+    std::vector<float> X_scale_host;
+    quantize_X_int8_transposed(X, N, d, Xq_T_host, X_scale_host);
+
+    CUDA_CHECK(cudaMalloc((void**)&d_Xq_T_, (size_t)N * d * sizeof(int8_t)));
+    CUDA_CHECK(cudaMalloc((void**)&d_X_scale_, (size_t)N * sizeof(float)));
+
+    CUDA_CHECK(cudaMemcpy(d_Xq_T_, Xq_T_host.data(),
+                          (size_t)N * d * sizeof(int8_t),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_X_scale_, X_scale_host.data(),
+                          (size_t)N * sizeof(float),
+                          cudaMemcpyHostToDevice));
+}
+
+GpuInt8TiledIndex::~GpuInt8TiledIndex()
+{
+    if (d_Q_) cudaFree(d_Q_);
+    if (d_S_) cudaFree(d_S_);
+    if (d_Xq_T_) cudaFree(d_Xq_T_);
+    if (d_X_scale_) cudaFree(d_X_scale_);
+}
+
+void GpuInt8TiledIndex::reserve_query_capacity(int B) const
+{
+    if (B <= scratch_B_) return;
+
+    if (d_Q_) {
+        CUDA_CHECK(cudaFree(d_Q_));
+        d_Q_ = nullptr;
+    }
+    if (d_S_) {
+        CUDA_CHECK(cudaFree(d_S_));
+        d_S_ = nullptr;
+    }
+
+    CUDA_CHECK(cudaMalloc((void**)&d_Q_, (size_t)B * d_ * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void**)&d_S_, (size_t)B * N_ * sizeof(float)));
+    scratch_B_ = B;
+}
+
+SearchResult GpuInt8TiledIndex::search(const float* Q, int B, int k) const
+{
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    reserve_query_capacity(B);
+
+    CUDA_CHECK(cudaMemcpy(d_Q_, Q, (size_t)B * d_ * sizeof(float),
+                          cudaMemcpyHostToDevice));
+
+    dim3 block(TILE, TILE);
+    dim3 grid((N_ + TILE - 1) / TILE, (B + TILE - 1) / TILE);
+    gpu_search_int8_tiled_kernel<<<grid, block>>>(d_Xq_T_, d_X_scale_,
+                                                  N_, d_, d_Q_, B, d_S_);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<float> scores_host((size_t)B * N_);
+    CUDA_CHECK(cudaMemcpy(scores_host.data(), d_S_,
+                          (size_t)B * N_ * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    SearchResult result = topk_from_scores(scores_host, B, N_, k);
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    result.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    return result;
+}
+
+SearchResult gpu_search_int8_tiled(const float* X, int N, int d,
+                                   const float* Q, int B, int k)
+{
+    auto t0 = std::chrono::high_resolution_clock::now();
+    GpuInt8TiledIndex index(X, N, d);
+    SearchResult result = index.search(Q, B, k);
     auto t1 = std::chrono::high_resolution_clock::now();
     result.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     return result;

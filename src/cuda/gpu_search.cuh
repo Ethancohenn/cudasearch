@@ -2,6 +2,8 @@
 
 #include "../core/cpu_search.hpp"
 
+#include <cstdint>
+
 namespace core {
 
 // maximum inner-product search (MIPS) on a single GPU.
@@ -42,5 +44,44 @@ SearchResult gpu_search_tiled(const float* X, int N, int d,
 // Q stays float, scores stay float, and top-k is still computed on the CPU.
 SearchResult gpu_search_int8(const float* X, int N, int d,
                              const float* Q, int B, int k);
+
+// Cached tiled INT8 GPU search.
+//
+// This variant is meant to behave more like a real vector-search index: the
+// database is quantized and copied to the GPU once in the constructor, then
+// query batches can be searched repeatedly without paying that setup cost.
+//
+// The quantized database is stored transposed as Xq_T[dim][row], so neighboring
+// CUDA threads reading consecutive database rows see contiguous int8 values.
+// The search kernel also uses the same 32-by-32 shared-memory tiling structure
+// as gpu_search_tiled.
+class GpuInt8TiledIndex {
+public:
+    GpuInt8TiledIndex(const float* X, int N, int d);
+    ~GpuInt8TiledIndex();
+
+    GpuInt8TiledIndex(const GpuInt8TiledIndex&) = delete;
+    GpuInt8TiledIndex& operator=(const GpuInt8TiledIndex&) = delete;
+
+    // Preallocate per-query-batch scratch buffers so benchmark trials do not
+    // include cudaMalloc/cudaFree overhead.
+    void reserve_query_capacity(int B) const;
+
+    SearchResult search(const float* Q, int B, int k) const;
+
+private:
+    int N_;
+    int d_;
+    int8_t* d_Xq_T_;
+    float* d_X_scale_;
+    mutable float* d_Q_;
+    mutable float* d_S_;
+    mutable int scratch_B_;
+};
+
+// Convenience wrappers. The cached index class above is better for benchmarks;
+// these one-shot helpers include database quantization/copy in wall_ms.
+SearchResult gpu_search_int8_tiled(const float* X, int N, int d,
+                                   const float* Q, int B, int k);
 
 }
