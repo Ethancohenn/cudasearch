@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(cudasearch CXX)
 
+enable_testing()
+
 # ── Standards ─────────────────────────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,6 +25,7 @@ endif()
 # ── CUDA ───────────────────────────────────────────────────────────────────────
 if(USE_CUDA)
   enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
   set(CMAKE_CUDA_STANDARD 17)
   # Set to your target GPU: 80=A100, 86=RTX3090, 89=RTX4090, 90=H100
   # Check with: nvidia-smi --query-gpu=compute_cap --format=csv,noheader
@@ -61,8 +64,24 @@ if(USE_CUDA)
     src/cuda/gpu_search.cu
   )
   target_include_directories(cudasearch_cuda PUBLIC src)
-  target_link_libraries(cudasearch_cuda PUBLIC cudasearch_core)
+  target_link_libraries(cudasearch_cuda PUBLIC cudasearch_core CUDA::cudart)
   target_compile_definitions(cudasearch_cuda PUBLIC HAVE_CUDA)
+endif()
+
+# ── Library: mpi ───────────────────────────────────────────────────────────────
+if(USE_MPI)
+  add_library(cudasearch_mpi STATIC
+    src/mpi/distributed_search.cpp
+  )
+  target_include_directories(cudasearch_mpi PUBLIC src)
+  target_link_libraries(cudasearch_mpi PUBLIC
+    cudasearch_core
+    MPI::MPI_CXX
+  )
+  target_compile_definitions(cudasearch_mpi PUBLIC HAVE_MPI)
+  if(USE_CUDA)
+    target_link_libraries(cudasearch_mpi PUBLIC cudasearch_cuda)
+  endif()
 endif()
 
 # ── Executable: bench ──────────────────────────────────────────────────────────
@@ -75,6 +94,15 @@ if(USE_CUDA)
   target_link_libraries(bench PRIVATE cudasearch_cuda)
 endif()
 
+# ── Executable: mpi_bench ──────────────────────────────────────────────────────
+if(USE_MPI)
+  add_executable(mpi_bench bench/mpi_bench.cpp)
+  target_link_libraries(mpi_bench PRIVATE
+    cudasearch_mpi
+    cudasearch_io
+  )
+endif()
+
 # ── Executable: test_recall ────────────────────────────────────────────────────
 add_executable(test_recall tests/test_recall.cpp)
 target_link_libraries(test_recall PRIVATE cudasearch_core cudasearch_io)
@@ -83,6 +111,26 @@ if(USE_OPENMP)
 endif()
 if(USE_CUDA)
   target_link_libraries(test_recall PRIVATE cudasearch_cuda)
+endif()
+
+# ── Executable: test_mpi ───────────────────────────────────────────────────────
+if(USE_MPI)
+  add_executable(test_mpi tests/test_mpi.cpp)
+  target_link_libraries(test_mpi PRIVATE
+    cudasearch_mpi
+    cudasearch_io
+  )
+
+  foreach(NRANKS 1 2 4)
+    add_test(
+      NAME test_mpi_${NRANKS}rank
+      COMMAND ${MPIEXEC_EXECUTABLE}
+              ${MPIEXEC_NUMPROC_FLAG} ${NRANKS}
+              ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_mpi>
+              ${MPIEXEC_POSTFLAGS}
+    )
+  endforeach()
 endif()
 
 # ── Summary ────────────────────────────────────────────────────────────────────

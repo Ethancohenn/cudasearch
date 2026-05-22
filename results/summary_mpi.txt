@@ -1,0 +1,22 @@
+SIFT1M FP32 tiled strong scaling:
+1 rank: 743.16 ms, 134.6 QPS, Recall@10 0.9900
+2 ranks: 472.50 ms, 211.6 QPS, Recall@10 0.9890
+4 ranks: 245.63 ms, 407.1 QPS, Recall@10 0.9890
+4-rank speedup: 3.03x, efficiency: 75.8%
+
+SIFT1M INT8 tiled strong scaling:
+1 rank: 693.75 ms, 144.1 QPS, Recall@10 0.9630
+2 ranks: 415.08 ms, 240.9 QPS, Recall@10 0.9630
+4 ranks: 222.12 ms, 450.2 QPS, Recall@10 0.9630
+4-rank speedup: 3.12x, efficiency: 78.0%
+
+SIFT1M FP32 tiled weak scaling:
+1 rank, N=250k: 227.55 ms, 439.5 QPS
+2 ranks, N=500k: 266.82 ms, 374.8 QPS
+4 ranks, N=1M: 245.78 ms, 406.9 QPS
+
+GIST1M FP32 tiled strong scaling:
+1 rank: 1482.38 ms, 67.5 QPS, Recall@10 0.3560
+2 ranks: 889.88 ms, 112.4 QPS, Recall@10 0.3560
+4 ranks: 385.77 ms, 259.2 QPS, Recall@10 0.3560
+4-rank speedup: 3.84x, efficiency: 96.1%

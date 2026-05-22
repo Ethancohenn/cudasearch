@@ -7,95 +7,64 @@ CME 213 Final Project — Ava Kouhana · Ethan Cohen · Stanford Spring 2026.
 
 Given a large pre-computed embedding database and one or more query vectors, CUDAsearch returns the **top-k maximum inner-product (MIPS)** results. This primitive drives semantic search, RAG retrieval, and recommendation systems.
 
-The system is built in three layers, introduced progressively across milestones:
+The system is built in three layers:
 
 | Layer |
 |---|
 | CPU baseline (OpenMP) |
 | CUDA kernels (naive + tiled + row-major INT8 + tiled INT8) |
-| MPI sharding across multiple GPUs (next milestone) |
+| MPI row sharding across multiple GPUs |
+
+## Milestones
+
+Course milestone writeups are in [`docs/milestones`](docs/milestones):
+
+- [Milestone 1](docs/milestones/milestone-1.pdf)
+- [Milestone 2](docs/milestones/milestone-2.pdf)
+- [Milestone 3](docs/milestones/milestone-3.pdf)
 
 ## Results
 
-Final benchmarks were run on the same `gpu-turing` node (`hpcc-gpu-5-1`) with one Quadro RTX 6000 GPU and 16 allocated CPU cores:
+Benchmarks run on `hpcc-gpu-5-1` (Quadro RTX 6000, 16 CPU cores). Unless noted: SIFT1M, `N=1,000,000`, `B=100`, `k=10`.
 
-```bash
-srun --partition=gpu-turing --nodelist=hpcc-gpu-5-1 \
-  --gres=gpu:1 --cpus-per-task=16 --mem=32G --pty bash
-```
+**Kernel comparison (SIFT1M):**
 
-All runs use `N=1,000,000` base vectors, batch size `B=100`, and `k=10`.
-
-
-**SIFT1M CPU scaling (OpenMP):**
-
-| Threads | mean latency | QPS |
-|---|---|---|
-| 1  | 5472 ms | 18.3 |
-| 2  | 2941 ms | 34.0 |
-| 4  | 1634 ms | 61.2 |
-| 8  | 1427 ms | 70.1 |
-| 16 | 1108 ms | 90.3 |
-
-Every CPU configuration returns **Recall@10 = 0.9890** against the SIFT1M reference ground truth. The best CPU baseline is the 16-thread run. OpenMP gives a 4.94× speedup from 1 to 16 threads, but scaling is sublinear, consistent with an exhaustive scan that becomes increasingly limited by shared memory bandwidth and threading overhead.
-
-**SIFT1M GPU comparison:**
-
-| Kernel | mean latency | QPS | Recall@10 | speedup vs CPU-16 |
+| Kernel | Latency | QPS | Recall@10 | Speedup vs CPU-16 |
 |---|---:|---:|---:|---:|
-| CPU-16 | 1108 ms | 90.3 | 0.9890 | 1.00× |
-| CUDA naive | 1047 ms | 95.5 | 0.9900 | 1.06× |
+| CPU-16 (OpenMP) | 1108 ms | 90.3 | 0.9890 | 1.00× |
 | CUDA tiled | 772 ms | 129.5 | 0.9900 | 1.43× |
-| CUDA INT8 | 1893 ms | 52.8 | 0.9630 | 0.59× |
 | CUDA INT8 tiled | 699 ms | 143.0 | 0.9630 | 1.58× |
+| MPI tiled (4 ranks) | 246 ms | 407.1 | 0.9890 | 4.50× |
+| MPI INT8 tiled (4 ranks) | 222 ms | 450.2 | 0.9630 | 4.99× |
 
-The naive CUDA kernel assigns one thread to one full dot product. The tiled
-kernel uses 32×32 thread blocks and shared memory tiles, so each block computes
-a 32×32 tile of the score matrix. On SIFT1M, tiling gives a **1.36× speedup
-over naive CUDA**. The first INT8 path is slower because it quantizes the full
-database inside every search call and still uses a naive row-major access
-pattern. The new `int8_tiled` path fixes those implementation costs by
-quantizing the database once, storing it in a transposed INT8 layout for
-coalesced reads, using the shared-memory tiled kernel structure, and reusing GPU
-scratch buffers across benchmark trials. It preserves the same INT8 Recall@10
-as the original INT8 path while improving latency by **2.71× over old INT8** and
-by **1.10× over FP32 tiled CUDA** on SIFT1M.
+The INT8 tiled kernel quantizes the database once at index-build time and stores it transposed for coalesced reads, giving a **1.10× speedup over FP32 tiled** on SIFT1M and **1.49× on GIST1M** (d=960), with a small recall drop from quantization.
 
-**GIST1M comparison:**
+**MPI strong scaling (FP32 tiled, fixed N=1M):**
 
-| Kernel | mean latency | QPS | Recall@10 | speedup vs CPU |
-|---|---:|---:|---:|---:|
-| CPU-16 | 7507 ms | 13.3 | 0.3560 | 1.00× |
-| CUDA naive | 8926 ms | 11.2 | 0.3560 | 0.84× |
-| CUDA tiled | 1542 ms | 64.9 | 0.3560 | 4.87× |
-| CUDA INT8 | 6497 ms | 15.4 | 0.3540 | 1.16× |
-| CUDA INT8 tiled | 1032 ms | 96.9 | 0.3540 | 7.28× |
+| Dataset | Ranks | Latency | QPS | Recall@10 | Speedup | Efficiency |
+|---|---:|---:|---:|---:|---:|---:|
+| SIFT1M | 1 | 743 ms | 134.6 | 0.9900 | 1.00× | 100% |
+| SIFT1M | 2 | 473 ms | 211.6 | 0.9890 | 1.57× | 78.6% |
+| SIFT1M | 4 | 246 ms | 407.1 | 0.9890 | 3.03× | 75.6% |
+| GIST1M | 1 | 1482 ms | 67.5 | 0.3560 | 1.00× | 100% |
+| GIST1M | 2 | 890 ms | 112.4 | 0.3560 | 1.67× | 83.3% |
+| GIST1M | 4 | 386 ms | 259.2 | 0.3560 | 3.84× | 96.1% |
 
-GIST1M has dimension `d=960`, compared with `d=128` for SIFT1M. The longer dot
-products make shared-memory tiling much more valuable: the FP32 tiled kernel is
-**5.79× faster than naive CUDA** on GIST1M. The new `int8_tiled` kernel benefits
-even more from reducing database memory traffic in this high-dimensional case:
-it is **6.30× faster than the original INT8 path** and **1.49× faster than FP32
-tiled CUDA** on GIST1M, with essentially the same recall as the original INT8
-kernel. The low GIST1M recall is not a CPU/GPU correctness issue because all
-implementations agree closely; it likely reflects a mismatch between our
-L2-normalized inner-product objective and the dataset's reference ground truth.
+GIST1M (d=960) scales better than SIFT1M (d=128) because larger dot products improve the compute-to-communication ratio. The low GIST1M recall is consistent across all kernels and reflects a mismatch between our L2-normalized inner-product objective and the dataset's reference ground truth.
 
-**Synthetic kernel check:**
+**Result files:**
 
-| Kernel | mean latency | QPS | Recall@10 |
-|---|---:|---:|---:|
-| CPU | 40.13 ms | 2491.7 | 1.0000 |
-| CUDA naive | 102.85 ms | 972.3 | 1.0000 |
-| CUDA tiled | 83.22 ms | 1201.6 | 1.0000 |
-| CUDA INT8 | 120.21 ms | 831.9 | 0.9890 |
-
-The synthetic check confirms that CPU, naive CUDA, and tiled CUDA match the generated ground truth exactly, while INT8 has a small expected recall drop from quantization.
-
-Earlier CPU-only measurements were collected from a GPU allocation that did not
-explicitly reserve CPU cores. Those results are kept in
-`results/cpu_scaling.csv` for reference, but the final speedups above use
-explicit 16-core GPU-node allocations.
+| File | Contents |
+|---|---|
+| `results/cpu_scaling_sift1m.csv` | SIFT1M OpenMP CPU scaling |
+| `results/cpu_scaling_gist1m.csv` | GIST1M OpenMP CPU scaling |
+| `results/sift1m_comparison.csv` | SIFT1M CPU/GPU kernel comparison |
+| `results/gist1m_comparison.csv` | GIST1M CPU/GPU kernel comparison |
+| `results/synthetic_kernel_check.csv` | Synthetic correctness/performance check |
+| `results/mpi/sift1m_strong_scaling.csv` | SIFT1M MPI FP32 tiled strong scaling |
+| `results/mpi/sift1m_weak_scaling.csv` | SIFT1M MPI FP32 tiled weak scaling |
+| `results/mpi/gist1m_strong_scaling.csv` | GIST1M MPI FP32 tiled strong scaling |
+| `results/mpi/sift1m_int8_tiled_strong_scaling.csv` | SIFT1M MPI INT8 tiled strong scaling |
 
 ## Datasets
 
@@ -104,7 +73,6 @@ explicit 16-core GPU-node allocations.
 | SIFT1M | 1 M | 128 | ~500 MB |
 | GIST1M | 1 M | 960 | ~3.6 GB |
 
-Download:
 ```bash
 bash scripts/download_datasets.sh --data ./data --only sift1m
 bash scripts/download_datasets.sh --data ./data --only gist1m
@@ -112,56 +80,52 @@ bash scripts/download_datasets.sh --data ./data --only gist1m
 
 ## Build
 
-Requirements: CMake ≥ 3.18, a C++17 compiler, (optionally) CUDA ≥ 11, OpenMPI.
+Requirements: CMake ≥ 3.18, C++17, (optionally) CUDA ≥ 11, OpenMPI.
 
 ```bash
 cmake -B build -DUSE_OPENMP=ON
 cmake --build build -j$(nproc)
 ```
 
-With CUDA on the Quadro RTX 6000:
+With CUDA (Quadro RTX 6000, sm_75):
 ```bash
 cmake -B build -DUSE_CUDA=ON -DUSE_OPENMP=ON -DCMAKE_CUDA_ARCHITECTURES=75
 cmake --build build -j$(nproc)
 ```
 
+With CUDA and MPI:
+```bash
+cmake -B build-mpi -DUSE_MPI=ON -DUSE_CUDA=ON -DUSE_OPENMP=ON -DCMAKE_CUDA_ARCHITECTURES=75
+cmake --build build-mpi -j$(nproc)
+```
+
 ## Run
 
-**Correctness test (synthetic, no data required):**
-```bash
-./build/test_recall
-```
-
-**Correctness test on real data:**
-```bash
-./build/test_recall --data ./data/sift1m sift1m
-```
-
-**Benchmark (synthetic):**
-```bash
-./build/bench --synthetic --syn-N 1000000 --syn-d 128 --k 10 --batch 64
-```
-
-**Benchmark (SIFT1M):**
+**CPU benchmark (SIFT1M):**
 ```bash
 ./build/bench --data ./data/sift1m --dataset sift1m --k 10 --batch 100 --trials 5
 ```
 
-**Benchmark (SIFT1M, GPU kernels):**
+**GPU benchmark (choose `--kernel naive | tiled | int8 | int8_tiled`):**
 ```bash
-./build/bench --data ./data/sift1m --dataset sift1m --kernel naive --k 10 --batch 100 --trials 5
 ./build/bench --data ./data/sift1m --dataset sift1m --kernel tiled --k 10 --batch 100 --trials 5
-./build/bench --data ./data/sift1m --dataset sift1m --kernel int8 --k 10 --batch 100 --trials 5
-./build/bench --data ./data/sift1m --dataset sift1m --kernel int8_tiled --k 10 --batch 100 --trials 5
 ```
 
-`int8_tiled` is the speed-focused INT8 path. It builds a cached quantized GPU
-index once before timed trials, stores the database in a transposed INT8 layout
-for coalesced reads, and reuses GPU scratch buffers across trials.
-
-**CSV output (for scripting):**
+**MPI benchmark (4 ranks, SIFT1M):**
 ```bash
-./build/bench --synthetic --csv
+mpirun -np 4 ./build-mpi/mpi_bench \
+  --data ./data/sift1m --dataset sift1m --kernel tiled \
+  --n 1000000 --batch 100 --k 10 --trials 2
+```
+
+**Correctness tests (MPI):**
+```bash
+ctest --test-dir build-mpi -R test_mpi --output-on-failure
+```
+
+The SLURM helper runs the full MPI scaling sweep and writes CSVs to `results/mpi/`:
+```bash
+sbatch scripts/run_mpi_bench.sh
 ```
 
 ## Project structure
@@ -171,8 +135,14 @@ cudasearch/
   src/
     io/           # Dataset loaders (.fvecs / .ivecs / .bvecs)
     core/         # CPU baseline + recall evaluation
-    cuda/         # CUDA naive, tiled, row-major INT8, and tiled INT8 implementations
-  bench/          # Benchmark driver
-  tests/          # Recall correctness tests
-  scripts/        # Dataset download scripts
+    cuda/         # CUDA naive, tiled, INT8, and INT8 tiled kernels
+    mpi/          # MPI row-sharded distributed search
+  bench/          # Single-node and MPI benchmark drivers
+  tests/          # Recall correctness tests (single-GPU + MPI)
+  scripts/        # Dataset download and cluster benchmark scripts
+  results/        # Benchmark CSVs
+    mpi/          # Distributed multi-GPU benchmark CSVs
+    archive/      # Older/intermediate benchmark CSVs
+  docs/
+    milestones/   # Course milestone PDFs
 ```
