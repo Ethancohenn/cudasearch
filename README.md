@@ -22,6 +22,7 @@ Course milestone writeups are in [`docs/milestones`](docs/milestones):
 - [Milestone 1](docs/milestones/milestone-1.pdf)
 - [Milestone 2](docs/milestones/milestone-2.pdf)
 - [Milestone 3](docs/milestones/milestone-3.pdf)
+- [Milestone 4](docs/milestones/milestone-4.pdf)
 
 ## Results
 
@@ -127,6 +128,26 @@ The SLURM helper runs the full MPI scaling sweep and writes CSVs to `results/mpi
 ```bash
 sbatch scripts/run_mpi_bench.sh
 ```
+
+**Nsight Systems profiling (1 rank and 4 ranks):**
+```bash
+bash scripts/run_nsys_profile.sh \
+  --data ./data/sift1m --dataset sift1m --kernel tiled --ranks 1
+
+bash scripts/run_nsys_profile.sh \
+  --data ./data/sift1m --dataset sift1m --kernel tiled --ranks 4
+```
+
+Open the generated `.qdrep` files in Nsight Systems and capture one screenshot
+from each timeline. For the Milestone 4 report, focus on:
+
+- Whether the 4-rank run remains dominated by GPU kernel time or shifts toward MPI gather/merge overhead
+- Whether communication is concentrated at batch boundaries, since the current implementation uses bulk-synchronous `MPI_Bcast` and `MPI_Gatherv`
+- Whether rank 0 shows extra host-side work during final merge of local top-k candidates
+
+The current benchmark CSVs already suggest the expected trend: on SIFT1M FP32 tiled,
+local search still dominates, but gather cost increases from `0.04 ms` at 1 rank to
+`15.63 ms` at 4 ranks, making root-side communication/merge the main scaling bottleneck.
 
 ## Project structure
 
