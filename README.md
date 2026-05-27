@@ -53,6 +53,20 @@ The INT8 tiled kernel quantizes the database once at index-build time and stores
 
 GIST1M (d=960) scales better than SIFT1M (d=128) because larger dot products improve the compute-to-communication ratio. The low GIST1M recall is consistent across all kernels and reflects a mismatch between our L2-normalized inner-product objective and the dataset's reference ground truth.
 
+**Nsight Systems profile (FP32 tiled, SIFT1M, single search call):**
+
+| Phase | 1 rank (ms) | 4 ranks, per rank (ms) | Scaling |
+|---|---:|---:|---:|
+| `gpu_search_tiled_kernel` (GPU) | 21.87 | 5.47 | 4.00× |
+| D2H memcpy (B×N score matrix) | 41.21 | 11.39 | 3.62× |
+| H2D memcpy (X shard, per call) | 46.92 | 12.18 | 3.85× |
+| `cudaLaunchKernel` | 0.20 | 0.22 | 0.91× |
+| GPU/CUDA-API subtotal | ~110 | ~29 | 3.79× |
+| Host top-k (CSV `local_ms` − subtotal) | ~633 | ~216 | 2.93× |
+| End-to-end `local_ms` (CSV, 5-trial mean) | 743 | 245 | 3.03× |
+
+The GPU kernel itself is only ~22 ms — ~92% of `local_ms` at 1 rank is the host-side `nth_element` top-k over the B×N score matrix that the FP32 tiled path copies back D2H every call. GPU work scales near-ideally (3.6–4.0×); host top-k scales 2.93× because each rank still sorts B rows serially. `cudaLaunchKernel` (~0.2 ms) and the per-batch query H2D (~3 µs) are not material. A device-side top-k is the single highest-impact remaining optimization; the INT8 tiled path already uses a persistent device-side index that would also amortize the X shard H2D.
+
 **Result files:**
 
 | File | Contents |
@@ -66,6 +80,8 @@ GIST1M (d=960) scales better than SIFT1M (d=128) because larger dot products imp
 | `results/mpi/sift1m_weak_scaling.csv` | SIFT1M MPI FP32 tiled weak scaling |
 | `results/mpi/gist1m_strong_scaling.csv` | GIST1M MPI FP32 tiled strong scaling |
 | `results/mpi/sift1m_int8_tiled_strong_scaling.csv` | SIFT1M MPI INT8 tiled strong scaling |
+| `results/nsys/sift1m_tiled_1r_*.nsys-rep` | Nsight Systems profile, FP32 tiled, 1 rank |
+| `results/nsys/sift1m_tiled_4r_*.nsys-rep` | Nsight Systems profile, FP32 tiled, 4 ranks |
 
 ## Datasets
 
