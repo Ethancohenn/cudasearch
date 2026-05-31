@@ -63,6 +63,16 @@ static bool test_synthetic_recall() {
         ds.base.data(), N, d, ds.queries.data(), B, k);
     check_result("cuda tiled", tiled_result, 0.9999f);
 
+    auto tiled_topk_result = core::gpu_search_tiled_topk(
+        ds.base.data(), N, d, ds.queries.data(), B, k);
+    check_result("cuda tiled topk", tiled_topk_result, 0.9999f);
+    float tiled_match = core::recall_at_k(tiled_topk_result, tiled_result.indices,
+                                          k, B, k);
+    printf("  %-16s Recall@%d = %.4f  (vs cuda tiled)\n",
+           "tiled topk match", k, tiled_match);
+    ok = check(tiled_match >= 0.9999f,
+               "GPU top-k result differs from cuda tiled baseline") && ok;
+
     auto int8_result = core::gpu_search_int8(
         ds.base.data(), N, d, ds.queries.data(), B, k);
     check_result("cuda int8", int8_result, 0.9000f);

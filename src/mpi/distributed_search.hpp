@@ -16,7 +16,7 @@ class GpuInt8TiledIndex;
 
 struct DistributedSearchConfig {
     // Must be the same on every rank.
-    // Supported kernels: cpu, naive, tiled, int8, int8_tiled.
+    // Supported kernels: cpu, naive, tiled, tiled_topk, int8, int8_tiled.
     std::string kernel = "cpu";
     int root = 0;
 };

@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -122,6 +123,53 @@ SearchResult gpu_search_naive(const float* X, int N, int d,
 // two numbers for the same dimension j.
 
 static constexpr int TILE = 32;
+static constexpr int TOPK_THREADS = 256;
+static constexpr int MAX_GPU_TOPK_K = 16;
+
+__device__ bool topk_better(float score_a, int index_a,
+                            float score_b, int index_b)
+{
+    if (score_a != score_b) return score_a > score_b;
+    return index_a < index_b;
+}
+
+__device__ void topk_insert(float score, int index,
+                            float* scores, int* indices, int k)
+{
+    int worst = 0;
+    for (int j = 1; j < k; ++j) {
+        if (topk_better(scores[worst], indices[worst],
+                        scores[j], indices[j])) {
+            worst = j;
+        }
+    }
+
+    if (topk_better(score, index, scores[worst], indices[worst])) {
+        scores[worst] = score;
+        indices[worst] = index;
+    }
+}
+
+__device__ void topk_sort_desc(float* scores, int* indices, int k)
+{
+    for (int i = 0; i < k; ++i) {
+        int best = i;
+        for (int j = i + 1; j < k; ++j) {
+            if (topk_better(scores[j], indices[j],
+                            scores[best], indices[best])) {
+                best = j;
+            }
+        }
+        if (best != i) {
+            float tmp_score = scores[i];
+            int tmp_index = indices[i];
+            scores[i] = scores[best];
+            indices[i] = indices[best];
+            scores[best] = tmp_score;
+            indices[best] = tmp_index;
+        }
+    }
+}
 
 __global__ void gpu_search_tiled_kernel(const float* X, int N, int d,
                                         const float* Q, int B, float* S)
@@ -175,6 +223,65 @@ __global__ void gpu_search_tiled_kernel(const float* X, int N, int d,
     }
 }
 
+__global__ void gpu_topk_kernel(const float* S, int N, int B, int k,
+                                float* out_scores, int* out_indices)
+{
+    int b = blockIdx.x;
+    if (b >= B) return;
+
+    float local_scores[MAX_GPU_TOPK_K];
+    int local_indices[MAX_GPU_TOPK_K];
+
+    for (int j = 0; j < k; ++j) {
+        local_scores[j] = -3.402823466e+38F;
+        local_indices[j] = INT_MAX;
+    }
+
+    const float* row = S + (size_t)b * N;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        topk_insert(row[i], i, local_scores, local_indices, k);
+    }
+
+    extern __shared__ unsigned char shared_bytes[];
+    float* shared_scores = reinterpret_cast<float*>(shared_bytes);
+    int* shared_indices = reinterpret_cast<int*>(shared_scores + blockDim.x * k);
+
+    const int shared_base = threadIdx.x * k;
+    for (int j = 0; j < k; ++j) {
+        shared_scores[shared_base + j] = local_scores[j];
+        shared_indices[shared_base + j] = local_indices[j];
+    }
+
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        float final_scores[MAX_GPU_TOPK_K];
+        int final_indices[MAX_GPU_TOPK_K];
+        for (int j = 0; j < k; ++j) {
+            final_scores[j] = -3.402823466e+38F;
+            final_indices[j] = INT_MAX;
+        }
+
+        const int n_candidates = blockDim.x * k;
+        for (int c = 0; c < n_candidates; ++c) {
+            int index = shared_indices[c];
+            if (index != INT_MAX) {
+                topk_insert(shared_scores[c], index,
+                            final_scores, final_indices, k);
+            }
+        }
+
+        topk_sort_desc(final_scores, final_indices, k);
+
+        float* out_score_row = out_scores + (size_t)b * k;
+        int* out_index_row = out_indices + (size_t)b * k;
+        for (int j = 0; j < k; ++j) {
+            out_score_row[j] = final_scores[j];
+            out_index_row[j] = final_indices[j];
+        }
+    }
+}
+
 SearchResult gpu_search_tiled(const float* X, int N, int d,
                               const float* Q, int B, int k)
 {
@@ -223,6 +330,60 @@ SearchResult gpu_search_tiled(const float* X, int N, int d,
     CUDA_CHECK(cudaFree(d_X));
     CUDA_CHECK(cudaFree(d_Q));
     CUDA_CHECK(cudaFree(d_S));
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    result.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    return result;
+}
+
+SearchResult gpu_search_tiled_topk(const float* X, int N, int d,
+                                   const float* Q, int B, int k)
+{
+    if (k <= 0)
+        throw std::invalid_argument("gpu_search_tiled_topk requires k > 0");
+    if (k > N)
+        throw std::invalid_argument("k > N in gpu_search_tiled_topk");
+    if (k > MAX_GPU_TOPK_K)
+        throw std::invalid_argument("gpu_search_tiled_topk currently requires k <= 16");
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    float *d_X, *d_Q, *d_S, *d_out_scores;
+    int* d_out_indices;
+    CUDA_CHECK(cudaMalloc(&d_X, (size_t)N * d * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_Q, (size_t)B * d * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_S, (size_t)B * N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out_scores, (size_t)B * k * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out_indices, (size_t)B * k * sizeof(int)));
+
+    CUDA_CHECK(cudaMemcpy(d_X, X, (size_t)N * d * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_Q, Q, (size_t)B * d * sizeof(float), cudaMemcpyHostToDevice));
+
+    dim3 matmul_block(TILE, TILE);
+    dim3 matmul_grid((N + TILE - 1) / TILE, (B + TILE - 1) / TILE);
+    gpu_search_tiled_kernel<<<matmul_grid, matmul_block>>>(d_X, N, d, d_Q, B, d_S);
+
+    const size_t shared_bytes =
+        (size_t)TOPK_THREADS * k * (sizeof(float) + sizeof(int));
+    gpu_topk_kernel<<<B, TOPK_THREADS, shared_bytes>>>(
+        d_S, N, B, k, d_out_scores, d_out_indices);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    SearchResult result;
+    result.indices.resize((size_t)B * k);
+    result.scores.resize((size_t)B * k);
+    CUDA_CHECK(cudaMemcpy(result.scores.data(), d_out_scores,
+                          (size_t)B * k * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(result.indices.data(), d_out_indices,
+                          (size_t)B * k * sizeof(int),
+                          cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaFree(d_X));
+    CUDA_CHECK(cudaFree(d_Q));
+    CUDA_CHECK(cudaFree(d_S));
+    CUDA_CHECK(cudaFree(d_out_scores));
+    CUDA_CHECK(cudaFree(d_out_indices));
 
     auto t1 = std::chrono::high_resolution_clock::now();
     result.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

@@ -34,6 +34,16 @@ SearchResult gpu_search_naive(const float* X, int N, int d,
 SearchResult gpu_search_tiled(const float* X, int N, int d,
                               const float* Q, int B, int k);
 
+// Tiled GPU search with device-side top-k.
+//
+// This computes the same B-by-N score matrix as gpu_search_tiled, but keeps the
+// score matrix on the GPU and launches a second kernel that selects the top-k
+// entries for each query. Only B*k indices and scores are copied back to the
+// host. This path is intended for the project benchmark regime with small k
+// values; currently k must be <= 16.
+SearchResult gpu_search_tiled_topk(const float* X, int N, int d,
+                                   const float* Q, int B, int k);
+
 // INT8 GPU search.
 //
 // This keeps the same one-thread-per-dot-product structure as the naive CUDA

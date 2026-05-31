@@ -54,6 +54,7 @@ bool is_cuda_kernel(const std::string& kernel)
 {
     return kernel == "naive" ||
            kernel == "tiled" ||
+           kernel == "tiled_topk" ||
            kernel == "int8" ||
            kernel == "int8_tiled";
 }
@@ -291,6 +292,8 @@ SearchResult DistributedSearchIndex::local_search(const float* Q, int B, int k,
         out = gpu_search_naive(X_local_.data(), local_N_, d_, Q, B, local_k);
     } else if (config_.kernel == "tiled") {
         out = gpu_search_tiled(X_local_.data(), local_N_, d_, Q, B, local_k);
+    } else if (config_.kernel == "tiled_topk") {
+        out = gpu_search_tiled_topk(X_local_.data(), local_N_, d_, Q, B, local_k);
     } else if (config_.kernel == "int8") {
         out = gpu_search_int8(X_local_.data(), local_N_, d_, Q, B, local_k);
     } else if (config_.kernel == "int8_tiled") {

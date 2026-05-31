@@ -6,7 +6,7 @@
 //  Options:
 //    --data <dir>         Path to dataset directory
 //    --dataset <name>     Dataset name (default: sift1m)
-//    --kernel <name>      Kernel: cpu, naive, tiled, int8, int8_tiled
+//    --kernel <name>      Kernel: cpu, naive, tiled, tiled_topk, int8, int8_tiled
 //    --k <int>            Number of neighbours (default: 10)
 //    --batch <int>        Query batch size (default: 100)
 //    --n <int>            Max database size (-1 = full, default: -1)

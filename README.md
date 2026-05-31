@@ -37,8 +37,14 @@ Benchmarks run on `hpcc-gpu-5-1` (Quadro RTX 6000, 16 CPU cores). Unless noted: 
 | CUDA INT8 tiled | 699 ms | 143.0 | 0.9630 | 1.58× |
 | MPI tiled (4 ranks) | 246 ms | 407.1 | 0.9890 | 4.50× |
 | MPI INT8 tiled (4 ranks) | 222 ms | 450.2 | 0.9630 | 4.99× |
+| MPI tiled + GPU top-k (4 ranks) | 31 ms | 3245.7 | 0.9890 | 35.96× |
 
 The INT8 tiled kernel quantizes the database once at index-build time and stores it transposed for coalesced reads, giving a **1.10× speedup over FP32 tiled** on SIFT1M and **1.49× on GIST1M** (d=960), with a small recall drop from quantization.
+
+The `tiled_topk` variant keeps top-k selection on the GPU. It still computes the
+same FP32 tiled score matrix, but copies only `B*k` result pairs back to the host
+instead of the full `B*N` score matrix. On SIFT1M at 4 ranks this reduces
+latency from **245.63 ms to 30.81 ms** versus the original FP32 tiled MPI path.
 
 **MPI strong scaling (FP32 tiled, fixed N=1M):**
 
@@ -80,6 +86,9 @@ The GPU kernel itself is only ~22 ms — ~92% of `local_ms` at 1 rank is the hos
 | `results/mpi/sift1m_weak_scaling.csv` | SIFT1M MPI FP32 tiled weak scaling |
 | `results/mpi/gist1m_strong_scaling.csv` | GIST1M MPI FP32 tiled strong scaling |
 | `results/mpi/sift1m_int8_tiled_strong_scaling.csv` | SIFT1M MPI INT8 tiled strong scaling |
+| `results/mpi/sift1m_tiled_topk_strong_scaling.csv` | SIFT1M MPI FP32 tiled + GPU top-k strong scaling |
+| `results/mpi/sift1m_tiled_topk_weak_scaling.csv` | SIFT1M MPI FP32 tiled + GPU top-k weak scaling |
+| `results/mpi/gist1m_tiled_topk_strong_scaling.csv` | GIST1M MPI FP32 tiled + GPU top-k strong scaling |
 | `results/nsys/sift1m_tiled_1r_*.nsys-rep` | Nsight Systems profile, FP32 tiled, 1 rank |
 | `results/nsys/sift1m_tiled_4r_*.nsys-rep` | Nsight Systems profile, FP32 tiled, 4 ranks |
 
@@ -123,15 +132,15 @@ cmake --build build-mpi -j$(nproc)
 ./build/bench --data ./data/sift1m --dataset sift1m --k 10 --batch 100 --trials 5
 ```
 
-**GPU benchmark (choose `--kernel naive | tiled | int8 | int8_tiled`):**
+**GPU benchmark (choose `--kernel naive | tiled | tiled_topk | int8 | int8_tiled`):**
 ```bash
-./build/bench --data ./data/sift1m --dataset sift1m --kernel tiled --k 10 --batch 100 --trials 5
+./build/bench --data ./data/sift1m --dataset sift1m --kernel tiled_topk --k 10 --batch 100 --trials 5
 ```
 
 **MPI benchmark (4 ranks, SIFT1M):**
 ```bash
 mpirun -np 4 ./build-mpi/mpi_bench \
-  --data ./data/sift1m --dataset sift1m --kernel tiled \
+  --data ./data/sift1m --dataset sift1m --kernel tiled_topk \
   --n 1000000 --batch 100 --k 10 --trials 2
 ```
 

@@ -67,6 +67,7 @@ bool kernel_supported(const std::string& kernel)
 #ifdef HAVE_CUDA
     return kernel == "naive" ||
            kernel == "tiled" ||
+           kernel == "tiled_topk" ||
            kernel == "int8" ||
            kernel == "int8_tiled";
 #else
@@ -81,7 +82,7 @@ std::vector<std::string> kernels_to_test(const Config& cfg)
     }
 
 #ifdef HAVE_CUDA
-    return {"tiled", "int8_tiled"};
+    return {"tiled", "tiled_topk", "int8_tiled"};
 #else
     return {"cpu"};
 #endif
@@ -104,6 +105,10 @@ core::SearchResult reference_search(const std::string& kernel,
     if (kernel == "tiled") {
         return core::gpu_search_tiled(ds.base.data(), ds.n_base, ds.dim,
                                       ds.queries.data(), B, k);
+    }
+    if (kernel == "tiled_topk") {
+        return core::gpu_search_tiled_topk(ds.base.data(), ds.n_base, ds.dim,
+                                           ds.queries.data(), B, k);
     }
     if (kernel == "int8") {
         return core::gpu_search_int8(ds.base.data(), ds.n_base, ds.dim,

@@ -10,13 +10,34 @@ SIFT1M INT8 tiled strong scaling:
 4 ranks: 222.12 ms, 450.2 QPS, Recall@10 0.9630
 4-rank speedup: 3.12x, efficiency: 78.0%
 
+SIFT1M FP32 tiled_topk strong scaling:
+1 rank: 107.87 ms, 927.0 QPS, Recall@10 0.9890
+2 ranks: 73.40 ms, 1362.5 QPS, Recall@10 0.9890
+4 ranks: 30.81 ms, 3245.7 QPS, Recall@10 0.9890
+4-rank speedup: 3.50x, efficiency: 87.5%
+Improvement over 4-rank FP32 tiled: 7.97x lower latency, 7.97x higher QPS
+Improvement over CPU-16 baseline: 35.96x lower latency, 35.94x higher QPS
+
 SIFT1M FP32 tiled weak scaling:
 1 rank, N=250k: 227.55 ms, 439.5 QPS
 2 ranks, N=500k: 266.82 ms, 374.8 QPS
 4 ranks, N=1M: 245.78 ms, 406.9 QPS
+
+SIFT1M FP32 tiled_topk weak scaling:
+1 rank, N=250k: 29.39 ms, 3402.6 QPS
+2 ranks, N=500k: 40.45 ms, 2472.0 QPS
+4 ranks, N=1M: 30.68 ms, 3259.2 QPS
+Weak-scaling latency stays within 1.38x from 1 to 4 ranks; recall is only meaningful for the full-N row because partial-N runs do not match the dataset ground truth.
 
 GIST1M FP32 tiled strong scaling:
 1 rank: 1482.38 ms, 67.5 QPS, Recall@10 0.3560
 2 ranks: 889.88 ms, 112.4 QPS, Recall@10 0.3560
 4 ranks: 385.77 ms, 259.2 QPS, Recall@10 0.3560
 4-rank speedup: 3.84x, efficiency: 96.1%
+
+GIST1M FP32 tiled_topk strong scaling:
+1 rank: 642.82 ms, 155.6 QPS, Recall@10 0.3560
+2 ranks: 462.74 ms, 216.1 QPS, Recall@10 0.3560
+4 ranks: 164.27 ms, 608.7 QPS, Recall@10 0.3560
+4-rank speedup: 3.91x, efficiency: 97.8%
+Improvement over 4-rank FP32 tiled: 2.35x lower latency, 2.35x higher QPS
