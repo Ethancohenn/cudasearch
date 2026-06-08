@@ -71,7 +71,7 @@ GIST1M (d=960) scales better than SIFT1M (d=128) because larger dot products imp
 | Host top-k (CSV `local_ms` − subtotal) | ~633 | ~216 | 2.93× |
 | End-to-end `local_ms` (CSV, 5-trial mean) | 743 | 245 | 3.03× |
 
-The GPU kernel itself is only ~22 ms — ~92% of `local_ms` at 1 rank is the host-side `nth_element` top-k over the B×N score matrix that the FP32 tiled path copies back D2H every call. GPU work scales near-ideally (3.6–4.0×); host top-k scales 2.93× because each rank still sorts B rows serially. `cudaLaunchKernel` (~0.2 ms) and the per-batch query H2D (~3 µs) are not material. A device-side top-k is the single highest-impact remaining optimization; the INT8 tiled path already uses a persistent device-side index that would also amortize the X shard H2D.
+The GPU kernel itself is only ~22 ms — ~92% of `local_ms` at 1 rank is the host-side `nth_element` top-k over the B×N score matrix that the FP32 tiled path copies back D2H every call. GPU work scales near-ideally (3.6–4.0×); host top-k scales 2.93× because each rank still sorts B rows serially. `cudaLaunchKernel` (~0.2 ms) and the per-batch query H2D (~3 µs) are not material. This profile motivated the `tiled_topk` path above, which keeps top-k selection on the GPU and copies back only `B*k` result pairs. The FP32 `tiled_topk` path still materializes the score matrix on device and re-uploads `X` per call; the INT8 tiled path already uses a persistent device-side index that amortizes the X shard H2D.
 
 **Result files:**
 
