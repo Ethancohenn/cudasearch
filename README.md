@@ -73,6 +73,19 @@ GIST1M (d=960) scales better than SIFT1M (d=128) because larger dot products imp
 
 The GPU kernel itself is only ~22 ms — ~92% of `local_ms` at 1 rank is the host-side `nth_element` top-k over the B×N score matrix that the FP32 tiled path copies back D2H every call. GPU work scales near-ideally (3.6–4.0×); host top-k scales 2.93× because each rank still sorts B rows serially. `cudaLaunchKernel` (~0.2 ms) and the per-batch query H2D (~3 µs) are not material. This profile motivated the `tiled_topk` path above, which keeps top-k selection on the GPU and copies back only `B*k` result pairs. The FP32 `tiled_topk` path still materializes the score matrix on device and re-uploads `X` per call; the INT8 tiled path already uses a persistent device-side index that amortizes the X shard H2D.
 
+**Nsight Systems profile (FP32 `tiled_topk`, SIFT1M, single search call):**
+
+| Phase | 1 rank (ms) | 4 ranks, per rank (ms) | Scaling |
+|---|---:|---:|---:|
+| `gpu_search_tiled_kernel` (GPU) | 28.82 | 5.93 | 4.86× |
+| `gpu_topk_kernel` (GPU) | 13.48 | 3.82 | 3.53× |
+| H2D memcpy (X shard, per call) | 47.36 | 12.29 | 3.85× |
+| D2H memcpy (B·k result pairs) | 0.002 | 0.001 | — |
+| GPU subtotal | 89.66 | 22.05 | 4.07× |
+| End-to-end `local_ms` (CSV, 5-trial mean) | 107.82 | 30.58 | 3.53× |
+
+With host top-k removed, the breakdown confirms the limiter is the local GPU search path itself: the per-call FP32 **X upload is now the single largest GPU-side cost** — 47.36 ms (≈49% of local) at 1 rank and 12.29 ms (≈40%) at 4 ranks — exceeding the score kernel. D2H falls to ~2 µs (the 400 MB B×N score matrix shrinks to ~8 KB of `B*k` pairs). Making the FP32 database persistent on the GPU, as `int8_tiled` already does, would remove that upload and is the highest-impact remaining optimization. 
+
 **Result files:**
 
 | File | Contents |
@@ -161,6 +174,12 @@ bash scripts/run_nsys_profile.sh \
 
 bash scripts/run_nsys_profile.sh \
   --data ./data/sift1m --dataset sift1m --kernel tiled --ranks 4
+```
+
+To profile the GPU top-k path instead, pass `--kernel tiled_topk`. 
+```bash
+bash scripts/run_nsys_profile.sh \
+  --data ./data/sift1m --dataset sift1m --kernel tiled_topk --ranks 4
 ```
 
 Open the generated `.qdrep` files in Nsight Systems and capture one screenshot

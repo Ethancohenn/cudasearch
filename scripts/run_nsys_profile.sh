@@ -5,6 +5,7 @@
 # Examples:
 #   bash scripts/run_nsys_profile.sh --data ./data/sift1m --dataset sift1m --ranks 1
 #   bash scripts/run_nsys_profile.sh --data ./data/sift1m --dataset sift1m --ranks 4
+#   bash scripts/run_nsys_profile.sh --data ./data/sift1m --dataset sift1m --kernel tiled_topk --ranks 4
 #
 # Notes:
 # - Run this on a machine with CUDA, MPI, and Nsight Systems installed.
@@ -39,7 +40,7 @@ Required:
 
 Options:
   --dataset <name>     Dataset name (default: sift1m)
-  --kernel <name>      Kernel: cpu, naive, tiled, int8, int8_tiled
+  --kernel <name>      Kernel: cpu, naive, tiled, tiled_topk, int8, int8_tiled
   --ranks <int>        MPI rank count (default: 1)
   --n <int>            Database size limit (default: 1000000)
   --batch <int>        Query batch size (default: 100)
